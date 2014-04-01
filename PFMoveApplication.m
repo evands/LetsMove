@@ -46,6 +46,18 @@
 // set this to NO
 static BOOL PFAllowInstallationInUserApplicationsDirectory = NO;
 
+typedef enum {
+    PFRunningAppMakeActive = 0,
+    PFRunningAppTerminate
+} PFRunningAppHandling;
+
+// Be default, if the app is already running in another instance we just switch
+// to it without copying.  Change this to PFRunningAppTerminate to force the other
+// instance to quit and allow a copy.
+//
+// Termination behavior is only available on OS X 10.6+. On 10.5, the app is always made active.
+static PFRunningAppHandling PFQuitRunningAppBehavior = PFRunningAppTerminate;
+
 static NSString *AlertSuppressKey = @"moveToApplicationsFolderAlertSuppress";
 
 
@@ -55,6 +67,8 @@ static BOOL IsRunningOnReadOnlyVolume(NSString *path);
 static BOOL IsInApplicationsFolder(NSString *path);
 static BOOL IsInDownloadsFolder(NSString *path);
 static BOOL IsApplicationAtPathRunning(NSString *path);
+static BOOL ForceQuitRunningApplicationAtPath(NSString *path);
+static void MakeAppActiveAtPathThenExit(NSString *path, void (*exitFunc)(int status));
 static NSString *ContainingDiskImageDevice(void);
 static BOOL Trash(NSString *path);
 static BOOL DeleteOrTrash(NSString *path);
@@ -170,16 +184,26 @@ void PFMoveToApplicationsFolderIfNecessaryWithCallback(void (*exitFunc)(int stat
 			if ([fm fileExistsAtPath:destinationPath]) {
 				// But first, make sure that it's not running
 				if (IsApplicationAtPathRunning(destinationPath)) {
-					// Give the running app focus and terminate myself
-					NSLog(@"INFO -- Switching to an already running version");
-					[[NSTask launchedTaskWithLaunchPath:@"/usr/bin/open" arguments:[NSArray arrayWithObject:destinationPath]] waitUntilExit];
-					exitFunc(0);
-                    return;
+                    
+                    switch (PFQuitRunningAppBehavior) {
+                        case PFRunningAppMakeActive:
+                        {
+                            // Give the running app focus and terminate myself
+                            MakeAppActiveAtPathThenExit(destinationPath, exitFunc);
+                            return;
+                        }
+                        case PFRunningAppTerminate:
+                        {
+                            if (ForceQuitRunningApplicationAtPath(destinationPath) == FALSE) {
+                                MakeAppActiveAtPathThenExit(destinationPath,exitFunc);
+                                return;
+                            }
+                        }
+                    }
 				}
-				else {
-					if (!Trash([applicationsDirectory stringByAppendingPathComponent:bundleName]))
-						goto fail;
-				}
+
+                if (!Trash([applicationsDirectory stringByAppendingPathComponent:bundleName]))
+                    goto fail;
 			}
 
  			if (!CopyBundle(bundlePath, destinationPath)) {
@@ -297,6 +321,34 @@ static BOOL IsInDownloadsFolder(NSString *path) {
 	}
 
 	return NO;
+}
+
+/* Returns YES if successful */
+static BOOL ForceQuitRunningApplicationAtPath(NSString *path) {
+#if MAC_OS_X_VERSION_MAX_ALLOWED > MAC_OS_X_VERSION_10_5
+	// Use the new API on 10.6 or higher to quit the app
+	if (floor(NSAppKitVersionNumber) > NSAppKitVersionNumber10_5) {
+		for (NSRunningApplication *runningApplication in [[NSWorkspace sharedWorkspace] runningApplications]) {
+			NSString *executablePath = [[runningApplication executableURL] path];
+			if ([executablePath hasPrefix:path]) {
+                [runningApplication forceTerminate];
+                
+                /* Wait 5 seconds so it has a chance to quit... this is truly not ideal */
+                sleep(5);
+				return YES;
+			}
+		}
+	}
+#endif
+
+    return NO;
+}
+
+static void MakeAppActiveAtPathThenExit(NSString *path, void (*exitFunc)(int status))
+{
+    NSLog(@"INFO -- Switching to an already running version");
+    [[NSTask launchedTaskWithLaunchPath:@"/usr/bin/open" arguments:[NSArray arrayWithObject:path]] waitUntilExit];
+    exitFunc(0);
 }
 
 static BOOL IsApplicationAtPathRunning(NSString *path) {
